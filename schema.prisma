@@ -1,0 +1,231 @@
+// ============================================================
+// Prisma schema — قاعدة بيانات المنصة التعليمية
+// ============================================================
+// هذا الملف يعرّف كل جداول قاعدة البيانات وعلاقاتها ببعض.
+// Prisma يحوّل هذا الوصف تلقائياً لقاعدة بيانات PostgreSQL حقيقية.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL") // Railway يجهز هذا تلقائياً
+}
+
+// ------------------------------------------------------------
+// المستخدمون (المدرسين + الأدمن العام)
+// ------------------------------------------------------------
+enum UserRole {
+  SUPER_ADMIN // الأستاذ أمير محمد (مالك المنصة)
+  INSTRUCTOR  // أي مدرس بالكادر
+}
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         UserRole @default(INSTRUCTOR)
+  subject      String? // المادة/التخصص (يظهر بصفحة البروفايل)
+  bio          String?
+  avatarUrl    String?
+  createdAt    DateTime @default(now())
+
+  // علاقات
+  courses          Course[]         @relation("CourseOwner")
+  ownedContent     ContentItem[]    @relation("ContentOwner")
+  receivedShares   ContentShare[]   @relation("ShareRecipient")
+  sentShares       ContentShare[]   @relation("ShareSender")
+  unlinkRequestsMade UnlinkRequest[] @relation("UnlinkRequester")
+}
+
+// ------------------------------------------------------------
+// الكورسات
+// ------------------------------------------------------------
+model Course {
+  id          String   @id @default(cuid())
+  title       String
+  description String?
+  price       Int      @default(0) // بالهلّة/القرش، 0 = مجاني بهذه المرحلة
+  isFree      Boolean  @default(true) // المرحلة الحالية: مجاني دائماً
+  createdAt   DateTime @default(now())
+
+  instructorId String
+  instructor   User   @relation("CourseOwner", fields: [instructorId], references: [id])
+
+  inviteCodes    InviteCode[]
+  enrollments    Enrollment[]
+  contentLinks   CourseContentLink[]
+  liveSessions   LiveSession[]
+  exams          Exam[]
+}
+
+// ------------------------------------------------------------
+// أكواد الدعوة (التسجيل الأوتوماتيكي)
+// ------------------------------------------------------------
+model InviteCode {
+  id        String   @id @default(cuid())
+  code      String   @unique // مثال: PHYS-7K2M-91
+  courseId  String
+  course    Course   @relation(fields: [courseId], references: [id])
+  isUsed    Boolean  @default(false)
+  usedById  String?
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+}
+
+// ------------------------------------------------------------
+// الطلاب
+// ------------------------------------------------------------
+model Student {
+  id           String   @id @default(cuid())
+  name         String
+  phone        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+
+  enrollments Enrollment[]
+  examAttempts ExamAttempt[]
+}
+
+// علاقة طالب-كورس (تُنشأ تلقائياً عند استخدام كود صحيح)
+model Enrollment {
+  id        String   @id @default(cuid())
+  studentId String
+  student   Student  @relation(fields: [studentId], references: [id])
+  courseId  String
+  course    Course   @relation(fields: [courseId], references: [id])
+  enrolledAt DateTime @default(now())
+
+  @@unique([studentId, courseId]) // يمنع تكرار التسجيل بنفس الكورس
+}
+
+// ------------------------------------------------------------
+// المحتوى (ملازم وبنوك أسئلة) — قابل للمشاركة بين المدرسين
+// ------------------------------------------------------------
+enum ContentType {
+  LECTURE_NOTE // ملزمة PDF
+  EXAM_BANK    // بنك أسئلة
+}
+
+model ContentItem {
+  id        String      @id @default(cuid())
+  title     String
+  type      ContentType
+  fileUrl   String? // رابط الملف المرفوع (للملازم)
+  createdAt DateTime    @default(now())
+
+  ownerId String
+  owner   User   @relation("ContentOwner", fields: [ownerId], references: [id])
+
+  shares       ContentShare[]
+  courseLinks  CourseContentLink[]
+  examQuestions ExamQuestion[] // إذا كان النوع بنك أسئلة
+}
+
+// مشاركة صريحة من المالك لمدرس معين
+model ContentShare {
+  id            String      @id @default(cuid())
+  contentItemId String
+  contentItem   ContentItem @relation(fields: [contentItemId], references: [id])
+  sharedById    String
+  sharedBy      User        @relation("ShareSender", fields: [sharedById], references: [id])
+  sharedWithId  String
+  sharedWith    User        @relation("ShareRecipient", fields: [sharedWithId], references: [id])
+  createdAt     DateTime    @default(now())
+
+  @@unique([contentItemId, sharedWithId])
+}
+
+// ربط المحتوى بكورس معين (أي مدرس مُستلِم يقدر يربط بكورسه)
+model CourseContentLink {
+  id            String      @id @default(cuid())
+  contentItemId String
+  contentItem   ContentItem @relation(fields: [contentItemId], references: [id])
+  courseId      String
+  course        Course      @relation(fields: [courseId], references: [id])
+  linkedAt      DateTime    @default(now())
+
+  unlinkRequest UnlinkRequest?
+
+  @@unique([contentItemId, courseId])
+}
+
+// طلب فك ربط (يحتاج موافقة المالك الأصلي أو مهلة 48 ساعة)
+enum UnlinkRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  AUTO_APPROVED // انتهت المهلة بدون رد
+}
+
+model UnlinkRequest {
+  id                  String              @id @default(cuid())
+  courseContentLinkId String             @unique
+  courseContentLink   CourseContentLink  @relation(fields: [courseContentLinkId], references: [id])
+  requestedById       String
+  requestedBy         User               @relation("UnlinkRequester", fields: [requestedById], references: [id])
+  status              UnlinkRequestStatus @default(PENDING)
+  createdAt           DateTime            @default(now())
+  deadlineAt          DateTime // createdAt + 48 ساعة — يُفك تلقائياً بعدها
+  resolvedAt          DateTime?
+}
+
+// ------------------------------------------------------------
+// البث المباشر (المرحلة الحالية: رابط خارجي فقط، بدون محرك بث داخلي)
+// ------------------------------------------------------------
+model LiveSession {
+  id          String   @id @default(cuid())
+  title       String
+  courseId    String
+  course      Course   @relation(fields: [courseId], references: [id])
+  externalUrl String   // رابط يوتيوب/زوم الحالي للمدرس
+  scheduledAt DateTime?
+  createdAt   DateTime @default(now())
+}
+
+// ------------------------------------------------------------
+// الامتحانات
+// ------------------------------------------------------------
+enum QuestionType {
+  MULTIPLE_CHOICE // تصحيح فوري
+  ESSAY           // تصحيح يدوي
+}
+
+model Exam {
+  id        String   @id @default(cuid())
+  title     String
+  courseId  String
+  course    Course   @relation(fields: [courseId], references: [id])
+  createdAt DateTime @default(now())
+
+  questions ExamQuestion[]
+  attempts  ExamAttempt[]
+}
+
+model ExamQuestion {
+  id            String       @id @default(cuid())
+  examId        String
+  exam          Exam         @relation(fields: [examId], references: [id])
+  contentItemId String? // إذا كان السؤال من بنك أسئلة مشترك
+  contentItem   ContentItem? @relation(fields: [contentItemId], references: [id])
+  type          QuestionType
+  questionText  String
+  choices       String[] // فقط لاختيار من متعدد
+  correctChoice  Int?     // index الإجابة الصحيحة (لاختيار من متعدد)
+  order         Int      @default(0)
+}
+
+model ExamAttempt {
+  id         String   @id @default(cuid())
+  examId     String
+  exam       Exam     @relation(fields: [examId], references: [id])
+  studentId  String
+  student    Student  @relation(fields: [studentId], references: [id])
+  answers    Json // { questionId: answerValue }
+  autoScore  Float? // نتيجة الاختيار من متعدد فقط (فوري)
+  manualScore Float? // نتيجة المقالي (يدوي من المدرس)
+  submittedAt DateTime @default(now())
+  gradedAt    DateTime?
+}
